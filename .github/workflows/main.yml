@@ -1,0 +1,114 @@
+name: Debug .NET 6 CI/CD for IIS Deployment
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  build-and-deploy:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Set up .NET
+      uses: actions/setup-dotnet@v3
+      with:
+        dotnet-version: '6.0.x'
+    
+    - name: Cache NuGet packages
+      uses: actions/cache@v3
+      with:
+        path: ~/.nuget/packages
+        key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj') }}
+        restore-keys: |
+             ${{ runner.os }}-nuget-
+
+    - name: Cache build output
+      uses: actions/cache@v3
+      with:
+        path: |
+          **/obj
+          **/bin
+        key: ${{ runner.os }}-dotnet-build-${{ hashFiles('**/*.csproj') }}
+        restore-keys: |
+          ${{ runner.os }}-dotnet-build-
+
+    - name: Restore dependencies
+      run: dotnet restore --no-cache    
+
+    - name: Build and Publish
+      run: dotnet publish -c Release -o ./publish --no-restore -p:PublishTrimmed=true #/p:EnableMSDeployAppOffline=true
+
+    - name: Verify Publish Directory
+      run: |
+        if (!(Test-Path -Path "./publish")) {
+          Write-Output "Error: Publish directory not found."
+          exit 1
+        } else {
+          Write-Output "Publish directory contents:"
+          Get-ChildItem -Path "./publish"
+        }
+    
+    - name: Check and Install Web Deploy
+      run: |
+        $msdeployPath = "C:\\Program Files\\IIS\\Microsoft Web Deploy V3\\msdeploy.exe"
+    
+        # Check if msdeploy.exe exists
+        if (Test-Path $msdeployPath) {
+          Write-Output "Web Deploy is already installed."
+        }
+        else {
+          Write-Output "Web Deploy not found. Installing via Chocolatey..."
+          choco install webdeploy --no-progress
+      
+          # Verify installation
+          if (Test-Path $msdeployPath) {
+            Write-Output "Web Deploy installed successfully."
+          }
+          else {
+            Write-Output "Error: msdeploy.exe not found after installation. Ensure Web Deploy installed correctly."
+            exit 1
+          }
+        }
+        
+    - name: Deploy to IIS Server
+      timeout-minutes: 20
+      env:
+        IIS_SERVER: "${{ secrets.IIS_SERVER }}"
+        IIS_SITE_NAME: ${{ secrets.IIS_SITE_NAME }}
+        IIS_USER: ${{ secrets.IIS_USER }}
+        IIS_PASSWORD: '-)S*V%r=wo4wEZS;;PS3.r-ATjnKSZw('
+        IIS_APPPOOL: 'testmp'
+      run: |
+        # Resolve absolute path for site.zip
+        $msdeployPath = "C:\\Program Files\\IIS\\Microsoft Web Deploy V3\\msdeploy.exe"
+        
+        $servername = "${env:IIS_SERVER}"
+        $sitename = "${env:IIS_SITE_NAME}"
+        $username = "${env:IIS_USER}"
+        $password = "${env:IIS_PASSWORD}"  # Store this securely in secrets in a production environment
+        
+        $appcmdPath = "C:\\Windows\\System32\\inetsrv\\appcmd.exe"
+        $appPoolName = "${env:IIS_APPPOOL}"
+
+        # Stop Application Pool
+        Start-Process -FilePath "C:\Windows\System32\inetsrv\appcmd.exe" -ArgumentList "stop", "apppool", "/apppool.name:$appPoolName" -Wait
+
+        # Use Start-Process with arguments array #executable below cmd with env and secrets
+        Start-Process -FilePath $msdeployPath -ArgumentList @(
+           "-verb:sync",
+           "-source:iisApp='${{ github.workspace }}\publish'",
+           "-dest:iisApp=$sitename,ComputerName=$servername,UserName=$username,Password=$password",
+           "-enableRule:AppOffline"                     # Force AppOffline rule
+           #"-skip:Directory='wwwroot\\logs'",           # Example directory to skip
+            "-skip:Directory='backup'",
+           "-skip:File='web.config'",                     # Example file pattern to skip
+           "-skip:File='appsettings.Development.json'"        # Skip specific file
+           "-skip:File='appsettings.json'"                    # Skip specific file
+        ) -NoNewWindow -Wait
+
+        # Start Application Pool
+        Start-Process -FilePath "C:\Windows\System32\inetsrv\appcmd.exe" -ArgumentList "start", "apppool", "/apppool.name:$appPoolName" -Wait
